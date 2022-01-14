@@ -4,13 +4,15 @@ pragma abicoder v2;
 
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
 
-contract StakingEarnBoxDKT {
+contract DuelistKingStaking {
   using SafeERC20 for ERC20;
+  using Address for address;
 
   /**
    * numberOfLockDays is a number of days that
-   * user must be stack before unstacking without penalty
+   * user must be stake before unstaking without penalty
    */
   struct StakingCampaign {
     uint64 startDate;
@@ -21,6 +23,7 @@ contract StakingEarnBoxDKT {
     uint256 limitStakingAmountForUser;
     address tokenAddress;
     uint256 maxNumberOfBoxes;
+    uint256 rewardPhaseBoxId;
     uint64 numberOfLockDays;
   }
 
@@ -28,11 +31,12 @@ contract StakingEarnBoxDKT {
     uint256 stakingAmountOfToken;
     uint256 stakedAmountOfBoxes;
     uint64 startStakingDate;
-    uint64 latestStakingDate;
+    uint64 lastStakingDate;
   }
 
   address private _owner;
   uint256 private totalCampaign;
+  uint32 constant transferRate = 1000000;
 
   mapping(uint256 => StakingCampaign) private _campaignStorage;
 
@@ -63,52 +67,36 @@ contract StakingEarnBoxDKT {
     uint256 indexed unStakeTime
   );
 
-  constructor(address owner_) {
-    _owner = owner_;
-  }
-
-  // Right now, the security is onlyOwner
-  // will be improve it later on base on business / technical
-  // requirements
-
-  modifier onlyOwner() {
-    require(
-      msg.sender == _owner,
-      "Staking: Only owner can create a new campaign"
-    );
-
-    _;
-  }
-
-  function greet() public view returns (address) {
-    return _owner;
-  }
-
-  function getBlockTime() public view returns (uint256) {
-    return block.timestamp;
-  }
+  // Issue box to user evnt
+  event IssueBoxes(
+    address indexed owner,
+    uint256 indexed rewardPhaseBoxId,
+    uint256 indexed numberOfBoxes
+  );
 
   function createNewStakingCampaign(StakingCampaign memory _newCampaign)
     external
-    onlyOwner
   {
     require(
-      _newCampaign.startDate > block.timestamp,
-      "Staking: Start date should be a future date"
+      _newCampaign.startDate > block.timestamp &&
+        _newCampaign.endDate > _newCampaign.startDate,
+      "StakingContract: Invalid timeline format"
     );
-    require(
-      _newCampaign.endDate > block.timestamp,
-      "Staking: End date should be a future date"
-    );
-    uint64 duration = (_newCampaign.endDate - _newCampaign.startDate) / 86400;
-    require(duration >= 1, "Staking: Duration must be at least 1 day");
+    uint64 duration = (_newCampaign.endDate - _newCampaign.startDate) /
+      (1 days);
+    require(duration >= 1, "StakingContract: Duration must be at least 1 day");
     require(
       _newCampaign.numberOfLockDays <= duration,
-      "Staking: Number of lock days should be less than duration event days"
+      "StakingContract: Number of lock days should be less than duration event days"
+    );
+    require(_newCampaign.rewardPhaseBoxId >= 1, "Invalid phase id");
+    require(
+      _newCampaign.tokenAddress.isContract(),
+      "StakingContract: Token address is not a smart contract"
     );
 
     _newCampaign.returnRate = uint128(
-      (_newCampaign.maxNumberOfBoxes * 1000000) /
+      (_newCampaign.maxNumberOfBoxes * transferRate) /
         (_newCampaign.maxAmountOfToken * duration)
     );
     _campaignStorage[totalCampaign] = _newCampaign;
@@ -123,96 +111,187 @@ contract StakingEarnBoxDKT {
     );
   }
 
-  function staking(uint256 _campaingId, uint256 _amountOfToken)
+  function calculatePendingBoxes(
+    UserStakingSlot memory userStakingSlot,
+    StakingCampaign memory campaign
+  ) private view returns (uint256) {
+    uint64 currentTimestamp = uint64(block.timestamp) > campaign.endDate
+      ? campaign.endDate
+      : uint64(block.timestamp);
+    return (((userStakingSlot.stakingAmountOfToken *
+      (currentTimestamp - userStakingSlot.lastStakingDate)) / (1 days)) *
+      campaign.returnRate);
+  }
+
+  function getCurrentUserReward(uint256 _campaignId)
+    private
+    view
+    returns (uint256)
+  {
+    StakingCampaign memory _currentCampaign = _campaignStorage[_campaignId];
+    UserStakingSlot memory currentUserStakingSlot = _userStakingSlot[
+      _campaignId
+    ][msg.sender];
+    return
+      currentUserStakingSlot.stakedAmountOfBoxes +
+      calculatePendingBoxes(currentUserStakingSlot, _currentCampaign);
+  }
+
+  function viewUserReward(uint256 _campaignId) public view returns (uint256) {
+    return getCurrentUserReward(_campaignId) / transferRate;
+  }
+
+  function getCurrentUserStakingAmount(uint256 _campaignId)
+    public
+    view
+    returns (uint256)
+  {
+    return _userStakingSlot[_campaignId][msg.sender].stakingAmountOfToken;
+  }
+
+  function staking(uint256 _campaignId, uint256 _amountOfToken)
     external
     returns (bool)
   {
-    StakingCampaign memory _currentCampaign = _campaignStorage[_campaingId];
+    StakingCampaign memory _currentCampaign = _campaignStorage[_campaignId];
     UserStakingSlot memory currentUserStakingSlot = _userStakingSlot[
-      _campaingId
+      _campaignId
     ][msg.sender];
     ERC20 currentToken = ERC20(_currentCampaign.tokenAddress);
 
     require(
       block.timestamp >= _currentCampaign.startDate,
-      "Staking: This staking event has not yet starting"
+      "StakingContract: This staking event has not yet starting"
     );
     require(
       block.timestamp < _currentCampaign.endDate,
-      "Staking: This stacking event has been expired"
+      "StakingContract: This staking event has been expired"
     );
     require(
       currentUserStakingSlot.stakingAmountOfToken + _amountOfToken <=
         _currentCampaign.limitStakingAmountForUser,
-      "Staking: Token limit per user exceeded"
+      "StakingContract: Token limit per user exceeded"
     );
 
     if (currentUserStakingSlot.stakingAmountOfToken == 0) {
       currentUserStakingSlot.startStakingDate = uint64(block.timestamp);
-      currentUserStakingSlot.latestStakingDate = uint64(block.timestamp);
+      currentUserStakingSlot.lastStakingDate = uint64(block.timestamp);
     }
+
+    require(
+      currentToken.balanceOf(msg.sender) >= _amountOfToken,
+      "StakingContract: Insufficient balance"
+    );
 
     uint256 beforeBalance = currentToken.balanceOf(address(this));
     currentToken.safeTransferFrom(msg.sender, address(this), _amountOfToken);
     uint256 afterBalance = currentToken.balanceOf(address(this));
     require(
       afterBalance - beforeBalance == _amountOfToken,
-      "Stacking: Invalid token transfer"
+      "StakingContract: Invalid token transfer"
     );
 
     _currentCampaign.stakedAmountOfToken += _amountOfToken;
     require(
       _currentCampaign.stakedAmountOfToken <= _currentCampaign.maxAmountOfToken,
-      "Staking: Token limit exceeded"
+      "StakingContract: Token limit exceeded"
     );
-    _campaignStorage[_campaingId] = _currentCampaign;
+    _campaignStorage[_campaignId] = _currentCampaign;
 
-    currentUserStakingSlot.stakedAmountOfBoxes +=
-      currentUserStakingSlot.stakingAmountOfToken *
-      (block.timestamp - currentUserStakingSlot.latestStakingDate) *
-      _currentCampaign.returnRate;
-    currentUserStakingSlot.latestStakingDate = uint64(block.timestamp);
+    currentUserStakingSlot.stakedAmountOfBoxes += calculatePendingBoxes(
+      currentUserStakingSlot,
+      _currentCampaign
+    );
+    currentUserStakingSlot.lastStakingDate = uint64(block.timestamp);
     currentUserStakingSlot.stakingAmountOfToken += _amountOfToken;
 
-    _userStakingSlot[_campaingId][msg.sender] = currentUserStakingSlot;
+    _userStakingSlot[_campaignId][msg.sender] = currentUserStakingSlot;
     emit Staking(msg.sender, _amountOfToken, block.timestamp);
     return true;
   }
 
-  function unStaking(uint256 _campaingId, address senderAddress)
+  function issueBoxes(
+    address owner,
+    uint256 rewardPhaseBoxId,
+    uint256 numberOfBoxes
+  ) private {
+    emit IssueBoxes(owner, rewardPhaseBoxId, numberOfBoxes);
+  }
+
+  function claimBoxes(uint256 _campaignId, uint256 _noBoxes)
     external
     returns (bool)
   {
     UserStakingSlot memory currentUserStakingSlot = _userStakingSlot[
-      _campaingId
+      _campaignId
     ][msg.sender];
-    StakingCampaign memory _currentCampaign = _campaignStorage[_campaingId];
+    StakingCampaign memory _currentCampaign = _campaignStorage[_campaignId];
+    require(_noBoxes >= 1, "StakingContract: Minimum 1 box");
+    // Validate number of boxes to be claimed
+    uint256 currentReward = getCurrentUserReward(_campaignId);
+    require(
+      _noBoxes <= currentReward / transferRate,
+      "StakingContract: Insufficient boxes"
+    );
+
+    // Validate claim duration
+    require(
+      block.timestamp >=
+        currentUserStakingSlot.startStakingDate +
+          (_currentCampaign.numberOfLockDays * (1 days)) ||
+        block.timestamp >= _currentCampaign.endDate,
+      "StakingContract: Unable to claim boxes before locked time"
+    );
+
+    // Issue box
+    issueBoxes(msg.sender, _currentCampaign.rewardPhaseBoxId, _noBoxes);
+
+    // Update user data
+    currentUserStakingSlot.stakedAmountOfBoxes =
+      currentReward -
+      _noBoxes *
+      transferRate;
+    currentUserStakingSlot.lastStakingDate = uint64(block.timestamp);
+    _userStakingSlot[_campaignId][msg.sender] = currentUserStakingSlot;
+    return true;
+  }
+
+  function unStaking(uint256 _campaignId) external returns (bool) {
+    UserStakingSlot memory currentUserStakingSlot = _userStakingSlot[
+      _campaignId
+    ][msg.sender];
+    StakingCampaign memory _currentCampaign = _campaignStorage[_campaignId];
     ERC20 currentToken = ERC20(_currentCampaign.tokenAddress);
 
     require(
       currentUserStakingSlot.stakingAmountOfToken > 0,
-      "Staking: No token to be unstacked"
+      "StakingContract: No token to be unstaked"
     );
-    require(msg.sender == senderAddress, "Staking: Require owner to unstack");
 
-    // User unstack before lockTime and in duration event
-    // will be paid for penalty fee
-    uint64 stackingDuration = uint64(
-      (block.timestamp - currentUserStakingSlot.startStakingDate) / (1 days)
-    );
+    // User unstake before lockTime and in duration event
+    // will be paid for penalty fee and no reward box
+    uint64 currentTimestamp = uint64(block.timestamp) > _currentCampaign.endDate
+      ? _currentCampaign.endDate
+      : uint64(block.timestamp);
+    uint64 stakingDuration = (currentTimestamp -
+      currentUserStakingSlot.startStakingDate) / (1 days);
+    // TODO: refactor the logic here, should follow the clean orders
     if (
-      stackingDuration < _currentCampaign.numberOfLockDays &&
+      stakingDuration < _currentCampaign.numberOfLockDays &&
       block.timestamp <= _currentCampaign.endDate
     ) {
-      currentToken.safeTransferFrom(
-        address(this),
+      uint256 penaltyAmount = (currentUserStakingSlot.stakingAmountOfToken *
+        2) / 100;
+      currentToken.safeTransfer(
         msg.sender,
-        (currentUserStakingSlot.stakingAmountOfToken * 98) / 100
+        currentUserStakingSlot.stakingAmountOfToken - penaltyAmount
       );
-
+      // remove user staking amount from the pool
+      _currentCampaign.stakedAmountOfToken -= currentUserStakingSlot
+        .stakingAmountOfToken;
       currentUserStakingSlot.stakedAmountOfBoxes = 0;
       currentUserStakingSlot.stakingAmountOfToken = 0;
-      _userStakingSlot[_campaingId][msg.sender] = currentUserStakingSlot;
+      _userStakingSlot[_campaignId][msg.sender] = currentUserStakingSlot;
       emit Unstaking(
         msg.sender,
         currentUserStakingSlot.stakingAmountOfToken,
@@ -221,22 +300,55 @@ contract StakingEarnBoxDKT {
       return true;
     }
 
-    // TODO: Issue boxes to user here
-    // mintBoxes()
-    currentToken.safeTransferFrom(
-      address(this),
+    currentUserStakingSlot.stakedAmountOfBoxes += calculatePendingBoxes(
+      currentUserStakingSlot,
+      _currentCampaign
+    );
+    currentToken.safeTransfer(
       msg.sender,
       currentUserStakingSlot.stakingAmountOfToken
     );
 
-    currentUserStakingSlot.stakedAmountOfBoxes = 0;
+    // remove user staking amount from the pool
+    _currentCampaign.stakedAmountOfToken -= currentUserStakingSlot
+      .stakingAmountOfToken;
     currentUserStakingSlot.stakingAmountOfToken = 0;
-    _userStakingSlot[_campaingId][msg.sender] = currentUserStakingSlot;
+    _userStakingSlot[_campaignId][msg.sender] = currentUserStakingSlot;
     emit Unstaking(
       msg.sender,
       currentUserStakingSlot.stakingAmountOfToken,
       block.timestamp
     );
+    return true;
+  }
+
+  function getBlockTime() public view returns (uint256) {
+    return block.timestamp;
+  }
+
+  function getTotalPenaltyAmount(uint256 campaignId)
+    public
+    view
+    returns (uint256)
+  {
+    StakingCampaign memory _currentCampaign = _campaignStorage[campaignId];
+    ERC20 currentToken = ERC20(_currentCampaign.tokenAddress);
+    return
+      currentToken.balanceOf(address(this)) -
+      _currentCampaign.stakedAmountOfToken;
+  }
+
+  function withdrawPenaltyPot(uint256 campaignId, address beneficiary)
+    external
+    returns (bool)
+  {
+    // TODO: check beneficiary is one of address in registry
+    StakingCampaign memory _currentCampaign = _campaignStorage[campaignId];
+    ERC20 currentToken = ERC20(_currentCampaign.tokenAddress);
+    uint256 withdrawingAmount = currentToken.balanceOf(address(this)) -
+      _currentCampaign.stakedAmountOfToken;
+    require(withdrawingAmount > 0, "StakingContract: Invalid penalty pot");
+    currentToken.safeTransfer(beneficiary, withdrawingAmount);
     return true;
   }
 }

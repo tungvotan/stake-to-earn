@@ -15,14 +15,17 @@ async function main() {
 
   // We get the contract to deploy
   const Greeter = await ethers.getContractFactory('Greeter');
-  const Staking = await ethers.getContractFactory('Staking');
+  const Staking = await ethers.getContractFactory('DuelistKingStaking');
+  const Token = await ethers.getContractFactory('Token');
   const greeter = await Greeter.deploy('Hello, Hardhat!');
-  const stakingContract = await Staking.deploy('0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266');
+  const stakingContract = await Staking.deploy();
+  const tokenContract = await Token.deploy('Queen T', 'QT');
   await stakingContract.deployed();
   await greeter.deployed();
 
   console.log('Greeter deployed to:', greeter.address);
-  console.log('Greeter deployed to:', stakingContract.address);
+  console.log('Stakig deployed to:', stakingContract.address);
+  console.log('Token deployed to:', tokenContract.address);
 }
 
 // We recommend this pattern to be able to use async/await everywhere
